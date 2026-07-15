@@ -627,23 +627,15 @@ def delete_post(post_id: str, payload: PostDeleteRequest | None = None) -> dict[
 @app.post("/api/posts/{post_id}/join")
 def join_post(post_id: str) -> dict[str, Any]:
     conn = get_connection()
-    post = conn.execute("SELECT id, joined_count FROM posts WHERE id = ?", (post_id,)).fetchone()
+    post = conn.execute("SELECT id, joined_count, max_count FROM posts WHERE id = ?", (post_id,)).fetchone()
     if not post:
         conn.close()
         raise HTTPException(status_code=404, detail="post not found")
 
-    existing = conn.execute(
-        "SELECT id FROM post_members WHERE post_id = ? AND user_id = ?",
-        (post_id, "user_1"),
-    ).fetchone()
-    if existing:
+    if post["joined_count"] >= post["max_count"]:
         conn.close()
-        return {"success": True, "data": {"joined": True, "joinedCount": post["joined_count"], "isJoined": True}}
+        raise HTTPException(status_code=400, detail="모집 인원이 마감되었습니다.")
 
-    conn.execute(
-        "INSERT INTO post_members (id, post_id, user_id, joined_at) VALUES (?, ?, ?, ?)",
-        (f"member_{post_id}", post_id, "user_1", "2026-07-14T14:10:00Z"),
-    )
     new_joined_count = post["joined_count"] + 1
     conn.execute("UPDATE posts SET joined_count = ? WHERE id = ?", (new_joined_count, post_id))
     conn.commit()
@@ -659,7 +651,6 @@ def leave_post(post_id: str) -> dict[str, Any]:
         conn.close()
         raise HTTPException(status_code=404, detail="post not found")
 
-    conn.execute("DELETE FROM post_members WHERE post_id = ? AND user_id = ?", (post_id, "user_1"))
     new_joined_count = max(0, post["joined_count"] - 1)
     conn.execute("UPDATE posts SET joined_count = ? WHERE id = ?", (new_joined_count, post_id))
     conn.commit()
