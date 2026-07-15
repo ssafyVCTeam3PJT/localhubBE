@@ -8,6 +8,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "localhub.db"
@@ -741,3 +745,30 @@ def get_posts_by_place(place_id: str) -> dict[str, Any]:
             ]
         },
     }
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/chat")
+async def chat_with_bot(payload: ChatRequest) -> dict[str, Any]:
+    from openai import AsyncOpenAI
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return {"success": False, "error": "OPENAI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요."}
+    
+    client = AsyncOpenAI(api_key=api_key)
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "너는 LocalHub(익명 기반 동네 모임/매칭 서비스)의 친절한 챗봇 도우미야. 사용자의 질문에 친절하고 간결하게 답변해줘. 주로 산책, 자전거, 실내운동, 캠핑 등의 스포츠/모임을 다루고 있어."},
+                {"role": "user", "content": payload.message}
+            ],
+            max_tokens=500
+        )
+        reply = response.choices[0].message.content
+        return {"success": True, "data": {"reply": reply}}
+    except Exception as e:
+        return {"success": False, "error": f"챗봇 응답 중 오류가 발생했습니다: {str(e)}"}

@@ -21,3 +21,4 @@ uvicorn==0.51.0
 watchfiles==1.2.0
 websockets==16.1
 bcrypt==4.1.2
+openai>=1.0.0
