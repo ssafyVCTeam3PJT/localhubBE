@@ -58,6 +58,47 @@ def test_post_update_delete_join_and_recommend_flow():
     assert delete_response.json()["data"]["deleted"] is True
 
 
+def test_edit_password_allows_update_and_delete():
+    create_response = client.post(
+        "/api/posts",
+        json={
+            "title": "비밀번호 테스트 모임",
+            "description": "비밀번호로 수정 삭제 가능",
+            "location": "테스트 장소",
+            "address": "테스트 주소",
+            "sport": "러닝",
+            "maxCount": 3,
+            "lat": 1.2,
+            "lng": 3.4,
+            "tags": ["테스트"],
+            "editPassword": "1234",
+        },
+    )
+    assert create_response.status_code == 201
+    post_id = create_response.json()["data"]["id"]
+
+    wrong_password_response = client.patch(
+        f"/api/posts/{post_id}",
+        json={"password": "wrong", "title": "잘못된 비밀번호"},
+    )
+    assert wrong_password_response.status_code == 401
+
+    update_response = client.patch(
+        f"/api/posts/{post_id}",
+        json={"password": "1234", "title": "수정된 제목"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["title"] == "수정된 제목"
+
+    delete_response = client.request(
+        "DELETE",
+        f"/api/posts/{post_id}",
+        json={"password": "1234"},
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"]["deleted"] is True
+
+
 def test_places_detail_endpoint():
     response = client.get("/api/places/place_1/posts")
     assert response.status_code == 200

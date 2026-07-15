@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import bcrypt
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
@@ -28,6 +29,16 @@ def classify_place_category(name: str, address: str = "") -> tuple[str, str]:
     if any(keyword in text for keyword in ["테니스", "골프", "클라이밍", "볼링", "헬스", "피트니스"]):
         return "실내운동", "💪"
     return "기타", "📍"
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, hashed_password: str | None) -> bool:
+    if not hashed_password:
+        return True
+    return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
 
 
 def load_public_data_places() -> None:
@@ -198,7 +209,9 @@ def init_db() -> None:
             lat REAL,
             lng REAL,
             tags TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            edit_password_hash TEXT
         );
 
         CREATE TABLE IF NOT EXISTS comments (
@@ -237,6 +250,13 @@ def init_db() -> None:
     )
     conn.commit()
 
+    post_info = conn.execute("PRAGMA table_info(posts)").fetchall()
+    post_columns = {row[1] for row in post_info}
+    if "updated_at" not in post_columns:
+        conn.execute("ALTER TABLE posts ADD COLUMN updated_at TEXT")
+    if "edit_password_hash" not in post_columns:
+        conn.execute("ALTER TABLE posts ADD COLUMN edit_password_hash TEXT")
+
     place_info = conn.execute("PRAGMA table_info(places)").fetchall()
     columns = {row[1] for row in place_info}
     if "category" not in columns:
@@ -269,6 +289,7 @@ class PostCreateRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
     tags: list[str] | None = None
+    editPassword: str | None = None
 
 
 class CommentCreateRequest(BaseModel):
@@ -286,6 +307,11 @@ class PostUpdateRequest(BaseModel):
     lat: float | None = None
     lng: float | None = None
     tags: list[str] | None = None
+    password: str | None = None
+
+
+class PostDeleteRequest(BaseModel):
+    password: str | None = None
 
 
 @app.get("/health")
@@ -370,12 +396,14 @@ def list_posts(
 def create_post(payload: PostCreateRequest) -> dict[str, Any]:
     conn = get_connection()
     post_id = f"post_{int(conn.execute('SELECT COUNT(*) FROM posts').fetchone()[0]) + 1}"
+    created_at = "2026-07-14T14:00:00Z"
+    edit_password_hash = hash_password(payload.editPassword) if payload.editPassword else None
     conn.execute(
         """
         INSERT INTO posts (
             id, title, description, location, address, sport, status, author_id, author_name,
-            views, joined_count, max_count, lat, lng, tags, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            views, joined_count, max_count, lat, lng, tags, created_at, updated_at, edit_password_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             post_id,
@@ -393,7 +421,9 @@ def create_post(payload: PostCreateRequest) -> dict[str, Any]:
             payload.lat,
             payload.lng,
             json.dumps(payload.tags or []),
-            "2026-07-14T14:00:00Z",
+            created_at,
+            created_at,
+            edit_password_hash,
         ),
     )
     conn.commit()
@@ -489,13 +519,17 @@ def increment_view(post_id: str) -> dict[str, Any]:
     return {"success": True, "data": {"views": new_views}}
 
 
-@app.put("/api/posts/{post_id}")
+@app.patch("/api/posts/{post_id}")
 def update_post(post_id: str, payload: PostUpdateRequest) -> dict[str, Any]:
     conn = get_connection()
     row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="post not found")
+
+    if row["edit_password_hash"] and not verify_password(payload.password or "", row["edit_password_hash"]):
+        conn.close()
+        raise HTTPException(status_code=401, detail="invalid password")
 
     updates: list[str] = []
     values: list[Any] = []
@@ -531,6 +565,9 @@ def update_post(post_id: str, payload: PostUpdateRequest) -> dict[str, Any]:
         updates.append("tags = ?")
         values.append(json.dumps(payload.tags))
 
+    updates.append("updated_at = ?")
+    values.append("2026-07-15T00:00:00Z")
+
     if updates:
         values.append(post_id)
         conn.execute(f"UPDATE posts SET {', '.join(updates)} WHERE id = ?", values)
@@ -561,13 +598,22 @@ def update_post(post_id: str, payload: PostUpdateRequest) -> dict[str, Any]:
     }
 
 
+@app.put("/api/posts/{post_id}")
+def update_post_put(post_id: str, payload: PostUpdateRequest) -> dict[str, Any]:
+    return update_post(post_id, payload)
+
+
 @app.delete("/api/posts/{post_id}")
-def delete_post(post_id: str) -> dict[str, Any]:
+def delete_post(post_id: str, payload: PostDeleteRequest | None = None) -> dict[str, Any]:
     conn = get_connection()
-    row = conn.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone()
+    row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="post not found")
+
+    if row["edit_password_hash"] and not verify_password((payload.password if payload else "") or "", row["edit_password_hash"]):
+        conn.close()
+        raise HTTPException(status_code=401, detail="invalid password")
 
     conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
     conn.execute("DELETE FROM post_members WHERE post_id = ?", (post_id,))
