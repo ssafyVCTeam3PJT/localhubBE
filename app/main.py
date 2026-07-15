@@ -761,7 +761,7 @@ async def chat_with_bot(payload: ChatRequest) -> dict[str, Any]:
     client = AsyncOpenAI(api_key=api_key)
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": "너는 LocalHub(익명 기반 동네 모임/매칭 서비스)의 친절한 챗봇 도우미야. 사용자의 질문에 친절하고 간결하게 답변해줘. 주로 산책, 자전거, 실내운동, 캠핑 등의 스포츠/모임을 다루고 있어."},
                 {"role": "user", "content": payload.message}
