@@ -59,15 +59,17 @@ def load_public_data_places() -> None:
     conn = get_connection()
     for item in items:
         place_id = f"place_{item.get('contentid', '') or len(items)}"
+        image_url = item.get("firstimage") or item.get("firstimage2") or ""
         existing = conn.execute("SELECT id FROM places WHERE id = ?", (place_id,)).fetchone()
         if existing:
+            conn.execute("UPDATE places SET image_url = ? WHERE id = ?", (image_url, place_id))
             continue
 
         category, emoji = classify_place_category(item.get("title", ""), item.get("addr1", ""))
         conn.execute(
             """
-            INSERT INTO places (id, name, address, lat, lng, category, emoji, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO places (id, name, address, lat, lng, category, emoji, image_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 place_id,
@@ -77,6 +79,7 @@ def load_public_data_places() -> None:
                 float(item["mapx"]) if item.get("mapx") else None,
                 category,
                 emoji,
+                image_url,
                 item.get("modifiedtime", "2026-07-14T00:00:00Z"),
             ),
         )
@@ -234,6 +237,7 @@ def init_db() -> None:
             lng REAL,
             category TEXT,
             emoji TEXT,
+            image_url TEXT,
             created_at TEXT NOT NULL
         );
 
@@ -267,6 +271,8 @@ def init_db() -> None:
         conn.execute("ALTER TABLE places ADD COLUMN category TEXT")
     if "emoji" not in columns:
         conn.execute("ALTER TABLE places ADD COLUMN emoji TEXT")
+    if "image_url" not in columns:
+        conn.execute("ALTER TABLE places ADD COLUMN image_url TEXT")
 
     rows = conn.execute("SELECT id, name, address FROM places").fetchall()
     for row in rows:
@@ -709,6 +715,7 @@ def list_places() -> dict[str, Any]:
                 "postCount": post_count,
                 "category": row["category"] or "기타",
                 "emoji": row["emoji"] or "📍",
+                "imageUrl": row["image_url"],
             }
         )
     conn.close()

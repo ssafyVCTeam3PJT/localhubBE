@@ -20,7 +20,7 @@ def classify_place_category(name: str, address: str = "") -> tuple[str, str]:
         return "자전거", "🚲"
     if any(keyword in text for keyword in ["캠핑", "야영", "카라반"]):
         return "캠핑", "🏕️"
-    if any(keyword in text for keyword in ["테니스", "골프", "클라이밍", "볼링", "헬스", "피트니스"]):
+    if any(keyword in text for keyword in ["테니스", "골프", "클라이밍", "볼링", "헬스", "피트니스", "사격장"]):
         return "실내운동", "💪"
     return "기타", "📍"
 
