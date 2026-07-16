@@ -561,6 +561,82 @@ def create_comment(post_id: str, payload: CommentCreateRequest) -> dict[str, Any
     }
 
 
+@app.post("/api/posts/{post_id}/join")
+def join_post(post_id: str, userId: str | None = Query("user_1")) -> dict[str, Any]:
+    conn = get_connection()
+    post = conn.execute("SELECT id, joined_count FROM posts WHERE id = ?", (post_id,)).fetchone()
+    if not post:
+        conn.close()
+        raise HTTPException(status_code=404, detail="post not found")
+
+    member = conn.execute(
+        "SELECT id FROM post_members WHERE post_id = ? AND user_id = ?",
+        (post_id, userId)
+    ).fetchone()
+
+    if member:
+        conn.close()
+        return {"success": True, "data": {"joined": True, "joinedCount": post["joined_count"], "isJoined": True}}
+
+    member_id = f"member_{post_id}_{userId}_{datetime.utcnow().timestamp()}"
+    created_at = datetime.utcnow().isoformat() + "Z"
+    
+    conn.execute(
+        "INSERT INTO post_members (id, post_id, user_id, joined_at) VALUES (?, ?, ?, ?)",
+        (member_id, post_id, userId, created_at)
+    )
+    
+    new_count = post["joined_count"] + 1
+    conn.execute("UPDATE posts SET joined_count = ? WHERE id = ?", (new_count, post_id))
+    
+    conn.commit()
+    conn.close()
+    
+    return {
+        "success": True, 
+        "data": {
+            "joined": True, 
+            "joinedCount": new_count, 
+            "isJoined": True
+        }
+    }
+
+
+@app.delete("/api/posts/{post_id}/join")
+def leave_post(post_id: str, userId: str | None = Query("user_1")) -> dict[str, Any]:
+    conn = get_connection()
+    post = conn.execute("SELECT id, joined_count FROM posts WHERE id = ?", (post_id,)).fetchone()
+    if not post:
+        conn.close()
+        raise HTTPException(status_code=404, detail="post not found")
+
+    member = conn.execute(
+        "SELECT id FROM post_members WHERE post_id = ? AND user_id = ?",
+        (post_id, userId)
+    ).fetchone()
+
+    if not member:
+        conn.close()
+        return {"success": True, "data": {"joined": False, "joinedCount": post["joined_count"], "isJoined": False}}
+
+    conn.execute("DELETE FROM post_members WHERE post_id = ? AND user_id = ?", (post_id, userId))
+    
+    new_count = max(0, post["joined_count"] - 1)
+    conn.execute("UPDATE posts SET joined_count = ? WHERE id = ?", (new_count, post_id))
+    
+    conn.commit()
+    conn.close()
+    
+    return {
+        "success": True, 
+        "data": {
+            "joined": False, 
+            "joinedCount": new_count, 
+            "isJoined": False
+        }
+    }
+
+
 @app.post("/api/posts/{post_id}/view")
 def increment_view(post_id: str) -> dict[str, Any]:
     conn = get_connection()
