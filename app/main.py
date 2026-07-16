@@ -1,12 +1,14 @@
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
+from datetime import datetime
 
 import bcrypt
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 import os
 from dotenv import load_dotenv
@@ -254,6 +256,16 @@ def init_db() -> None:
             user_id TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            nickname TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_post_id ON chat_messages(post_id);
         """
     )
     conn.commit()
@@ -337,6 +349,7 @@ def list_posts(
     location: str | None = None,
     status: str | None = None,
     sort: str | None = None,
+    userId: str | None = Query("user_1"),
 ) -> dict[str, Any]:
     conn = get_connection()
     query = "SELECT * FROM posts"
@@ -363,6 +376,14 @@ def list_posts(
     else:
         query += " ORDER BY created_at DESC"
 
+    joined_post_ids = set()
+    if userId:
+        joined_rows = conn.execute(
+            "SELECT post_id FROM post_members WHERE user_id = ?",
+            (userId,)
+        ).fetchall()
+        joined_post_ids = {r["post_id"] for r in joined_rows}
+
     rows = conn.execute(query, params).fetchall()
     total = len(rows)
     posts = []
@@ -386,7 +407,7 @@ def list_posts(
                 "lng": row["lng"],
                 "tags": json.loads(row["tags"]) if row["tags"] else [],
                 "commentCount": 0,
-                "isJoined": False,
+                "isJoined": row["id"] in joined_post_ids,
             }
         )
 
@@ -442,7 +463,7 @@ def create_post(payload: PostCreateRequest) -> dict[str, Any]:
 
 
 @app.get("/api/posts/{post_id}")
-def get_post(post_id: str) -> dict[str, Any]:
+def get_post(post_id: str, userId: str | None = Query("user_1")) -> dict[str, Any]:
     conn = get_connection()
     row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
     if not row:
@@ -453,6 +474,15 @@ def get_post(post_id: str) -> dict[str, Any]:
         "SELECT id, author_name, content, created_at FROM comments WHERE post_id = ? ORDER BY created_at DESC",
         (post_id,),
     ).fetchall()
+
+    is_joined = False
+    if userId:
+        member = conn.execute(
+            "SELECT id FROM post_members WHERE post_id = ? AND user_id = ?",
+            (post_id, userId)
+        ).fetchone()
+        is_joined = True if member else False
+
     conn.close()
     return {
         "success": True,
@@ -482,7 +512,7 @@ def get_post(post_id: str) -> dict[str, Any]:
                 }
                 for comment in comments
             ],
-            "isJoined": False,
+            "isJoined": is_joined,
         },
     }
 
@@ -635,16 +665,33 @@ def delete_post(post_id: str, payload: PostDeleteRequest | None = None) -> dict[
 
 
 @app.post("/api/posts/{post_id}/join")
-def join_post(post_id: str) -> dict[str, Any]:
+def join_post(post_id: str, userId: str | None = Query("user_1")) -> dict[str, Any]:
     conn = get_connection()
     post = conn.execute("SELECT id, joined_count, max_count FROM posts WHERE id = ?", (post_id,)).fetchone()
     if not post:
         conn.close()
         raise HTTPException(status_code=404, detail="post not found")
 
+    # 이미 참여 중인지 확인
+    existing = conn.execute(
+        "SELECT id FROM post_members WHERE post_id = ? AND user_id = ?",
+        (post_id, userId)
+    ).fetchone()
+    if existing:
+        conn.close()
+        return {"success": True, "data": {"joined": True, "joinedCount": post["joined_count"], "isJoined": True}}
+
     if post["joined_count"] >= post["max_count"]:
         conn.close()
         raise HTTPException(status_code=400, detail="모집 인원이 마감되었습니다.")
+
+    # 멤버 추가
+    member_id = f"member_{post_id}_{userId}_{int(conn.execute('SELECT COUNT(*) FROM post_members').fetchone()[0]) + 1}"
+    joined_at = datetime.utcnow().isoformat() + "Z"
+    conn.execute(
+        "INSERT INTO post_members (id, post_id, user_id, joined_at) VALUES (?, ?, ?, ?)",
+        (member_id, post_id, userId, joined_at)
+    )
 
     new_joined_count = post["joined_count"] + 1
     conn.execute("UPDATE posts SET joined_count = ? WHERE id = ?", (new_joined_count, post_id))
@@ -654,12 +701,27 @@ def join_post(post_id: str) -> dict[str, Any]:
 
 
 @app.delete("/api/posts/{post_id}/join")
-def leave_post(post_id: str) -> dict[str, Any]:
+def leave_post(post_id: str, userId: str | None = Query("user_1")) -> dict[str, Any]:
     conn = get_connection()
     post = conn.execute("SELECT id, joined_count FROM posts WHERE id = ?", (post_id,)).fetchone()
     if not post:
         conn.close()
         raise HTTPException(status_code=404, detail="post not found")
+
+    # 참여 여부 확인
+    existing = conn.execute(
+        "SELECT id FROM post_members WHERE post_id = ? AND user_id = ?",
+        (post_id, userId)
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return {"success": True, "data": {"joined": False, "joinedCount": post["joined_count"], "isJoined": False}}
+
+    # 멤버 탈퇴
+    conn.execute(
+        "DELETE FROM post_members WHERE post_id = ? AND user_id = ?",
+        (post_id, userId)
+    )
 
     new_joined_count = max(0, post["joined_count"] - 1)
     conn.execute("UPDATE posts SET joined_count = ? WHERE id = ?", (new_joined_count, post_id))
@@ -779,3 +841,126 @@ async def chat_with_bot(payload: ChatRequest) -> dict[str, Any]:
         return {"success": True, "data": {"reply": reply}}
     except Exception as e:
         return {"success": False, "error": f"챗봇 응답 중 오류가 발생했습니다: {str(e)}"}
+
+
+class ConnectionManager:
+    def __init__(self):
+        # key: post_id (str), value: WebSocket 객체 리스트
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+
+    async def connect(self, post_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if post_id not in self.active_connections:
+            self.active_connections[post_id] = []
+        self.active_connections[post_id].append(websocket)
+
+    def disconnect(self, post_id: str, websocket: WebSocket):
+        if post_id in self.active_connections:
+            self.active_connections[post_id].remove(websocket)
+            if not self.active_connections[post_id]:
+                del self.active_connections[post_id]
+
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        await websocket.send_json(message)
+
+    async def broadcast(self, post_id: str, message: dict):
+        if post_id in self.active_connections:
+            for connection in self.active_connections[post_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    # 끊어진 연결 처리
+                    self.disconnect(post_id, connection)
+
+manager = ConnectionManager()
+
+
+def _get_chat_history(post_id: str) -> list[dict]:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT user_id, nickname, content, created_at 
+            FROM chat_messages 
+            WHERE post_id = ? 
+            ORDER BY id DESC LIMIT 50
+            """, 
+            (post_id,)
+        ).fetchall()
+        return [
+            {
+                "userId": row["user_id"],
+                "nickname": row["nickname"],
+                "content": row["content"],
+                "createdAt": row["created_at"]
+            }
+            for row in reversed(rows)
+        ]
+    finally:
+        conn.close()
+
+
+def _save_chat_message(post_id: str, user_id: str, nickname: str, content: str, created_at: str) -> None:
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO chat_messages (post_id, user_id, nickname, content, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (post_id, user_id, nickname, content, created_at)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.websocket("/api/ws/chat/{post_id}")
+async def websocket_endpoint(websocket: WebSocket, post_id: str, userId: str, nickname: str):
+    await manager.connect(post_id, websocket)
+    
+    try:
+        # 1. 연결 성공 시, 해당 방의 기존 최근 50개 대화 내역 조회하여 전송
+        previous_messages = await run_in_threadpool(_get_chat_history, post_id)
+        await manager.send_personal_message(
+            {"type": "history", "messages": previous_messages}, 
+            websocket
+        )
+        
+        # 2. 입장 브로드캐스트
+        await manager.broadcast(post_id, {
+            "type": "system",
+            "content": f"📢 {nickname} 님이 참여했습니다.",
+            "createdAt": datetime.utcnow().isoformat() + "Z"
+        })
+        
+        # 3. 실시간 메시지 수신 대기 루프
+        while True:
+            data = await websocket.receive_text()
+            payload = json.loads(data)
+            content = payload.get("content", "").strip()
+            
+            if not content:
+                continue
+                
+            created_at = datetime.utcnow().isoformat() + "Z"
+            
+            # DB에 메시지 저장
+            await run_in_threadpool(_save_chat_message, post_id, userId, nickname, content, created_at)
+            
+            # 같은 방(post_id)의 모든 접속자에게 브로드캐스트
+            await manager.broadcast(post_id, {
+                "type": "message",
+                "userId": userId,
+                "nickname": nickname,
+                "content": content,
+                "createdAt": created_at
+            })
+            
+    except WebSocketDisconnect:
+        manager.disconnect(post_id, websocket)
+        await manager.broadcast(post_id, {
+            "type": "system",
+            "content": f"📢 {nickname} 님이 나갔습니다.",
+            "createdAt": datetime.utcnow().isoformat() + "Z"
+        })
