@@ -257,6 +257,13 @@ def init_db() -> None:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS chats (
+            id TEXT PRIMARY KEY,
+            post_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             post_id TEXT NOT NULL,
@@ -813,6 +820,72 @@ def get_posts_by_place(place_id: str) -> dict[str, Any]:
                 for row in rows
             ]
         },
+    }
+
+
+@app.get("/api/chats")
+def list_chats() -> dict[str, Any]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM chats ORDER BY created_at DESC").fetchall()
+    chats = []
+    for row in rows:
+        chats.append({
+            "id": row["id"],
+            "postId": row["post_id"],
+            "title": row["title"],
+            "createdAt": row["created_at"],
+        })
+    conn.close()
+    return {"success": True, "data": {"chats": chats}}
+
+
+class ChatRoomCreateRequest(BaseModel):
+    postId: str
+
+
+@app.post("/api/chats")
+def create_chat(payload: ChatRoomCreateRequest) -> dict[str, Any]:
+    conn = get_connection()
+    post = conn.execute("SELECT id, title FROM posts WHERE id = ?", (payload.postId,)).fetchone()
+    if not post:
+        conn.close()
+        raise HTTPException(status_code=404, detail="post not found")
+
+    existing = conn.execute("SELECT * FROM chats WHERE post_id = ?", (payload.postId,)).fetchone()
+    if existing:
+        conn.close()
+        return {
+            "success": True, 
+            "data": {
+                "chat": {
+                    "id": existing["id"],
+                    "postId": existing["post_id"],
+                    "title": existing["title"],
+                    "createdAt": existing["created_at"]
+                }
+            }
+        }
+
+    chat_id = f"chat_{payload.postId}"
+    created_at = datetime.utcnow().isoformat() + "Z"
+    
+    conn.execute(
+        "INSERT INTO chats (id, post_id, title, created_at) VALUES (?, ?, ?, ?)",
+        (chat_id, payload.postId, post["title"], created_at)
+    )
+    conn.commit()
+    conn.close()
+    
+    return {
+        "success": True, 
+        "data": {
+            "chat": {
+                "id": chat_id,
+                "postId": payload.postId,
+                "title": post["title"],
+                "createdAt": created_at
+            }
+        }
     }
 
 
