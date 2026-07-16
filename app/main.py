@@ -431,11 +431,12 @@ def list_posts(
 
 
 @app.post("/api/posts", status_code=201)
-def create_post(payload: PostCreateRequest) -> dict[str, Any]:
+def create_post(payload: PostCreateRequest, userId: str | None = Query("user_1"), authorName: str | None = Query("익명")) -> dict[str, Any]:
     conn = get_connection()
     post_id = f"post_{int(conn.execute('SELECT COUNT(*) FROM posts').fetchone()[0]) + 1}"
-    created_at = "2026-07-14T14:00:00Z"
+    created_at = datetime.utcnow().isoformat() + "Z"
     edit_password_hash = hash_password(payload.editPassword) if payload.editPassword else None
+    
     conn.execute(
         """
         INSERT INTO posts (
@@ -451,10 +452,10 @@ def create_post(payload: PostCreateRequest) -> dict[str, Any]:
             payload.address,
             payload.sport,
             "모집중",
-            "user_1",
-            "익명",
+            userId,
+            authorName,
             0,
-            0,
+            1,  # author is automatically joined
             payload.maxCount or 10,
             payload.lat,
             payload.lng,
@@ -464,6 +465,14 @@ def create_post(payload: PostCreateRequest) -> dict[str, Any]:
             edit_password_hash,
         ),
     )
+    
+    # Add author to post_members
+    member_id = f"member_{post_id}_{userId}_1"
+    conn.execute(
+        "INSERT INTO post_members (id, post_id, user_id, joined_at) VALUES (?, ?, ?, ?)",
+        (member_id, post_id, userId, created_at)
+    )
+    
     conn.commit()
     conn.close()
     return {"success": True, "data": {"id": post_id}}
